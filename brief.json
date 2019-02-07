@@ -1,0 +1,8 @@
+{
+  "description": "Fast Http Server",
+  "name": "http-fast",
+  "path": "dist",
+  "version": "0.1.1",
+  "author": "Nery Jr",
+  "dependencies": []
+}
