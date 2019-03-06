@@ -9,7 +9,6 @@ let ServerSocketChannel = Java.type('java.nio.channels.ServerSocketChannel')
 let SocketChannel = Java.type('java.nio.channels.SocketChannel')
 let Iterator = Java.type('java.util.Iterator')
 let StandardCharsets = Java.type('java.nio.charset.StandardCharsets')
-let ByteArray = Java.type('byte[]')
 
 /**
  * Gerenciador de rotas. Processa as requisições HTTP e segundo definições
@@ -38,7 +37,11 @@ function createServer(port, httpRouter, options) {
 
     let selector = Selector.open()
     let serverSocket = ServerSocketChannel.open()
-    let serverAddress = new InetSocketAddress('127.0.0.1', port)
+
+    let httpFastConfig = getConfig()['http-fast']
+    let httpFastIP = httpFastConfig ? httpFastConfig.address : '127.0.0.1'
+    let serverAddress = new InetSocketAddress(httpFastIP || '127.0.0.1', port)
+
     serverSocket.bind(serverAddress)
     serverSocket.configureBlocking(false)
     let ops = serverSocket.validOps()
@@ -61,13 +64,17 @@ function createServer(port, httpRouter, options) {
                     // print("Connection Accepted: " + client.getLocalAddress() + "\n");
                 } else if (myKey.isReadable()) {
                     let channel = myKey.channel()
-                    let buffer = ByteBuffer.allocate(2048)
+
+                    let httpReadBufferSize = httpFastConfig.readBufferSize || (32 * 2014)
+                    let buffer = ByteBuffer.allocate(httpReadBufferSize)
+
                     let len = channel.read(buffer)
 
                     if (len <= 0) {
-                        channel.close()
                         continue
                     }
+
+                    buffer.flip()
                     let textRequest = new JString(buffer.array(), 0, len, StandardCharsets.UTF_8)
                     // print("Message received: " + textRequest);
 
@@ -76,11 +83,12 @@ function createServer(port, httpRouter, options) {
                     } catch (e) {
                         console.log('[ERROR] -', e.stack)
                         let content = e.toString()
-                        let response = new JString('HTTP/1.1 500 Internal Server Error\r\n' + 'Date: ' + new Date().toString() + '\r\n' + 'Content-Type: text/plain\r\n' + 'Content-Length: ' + content.length + '\r\n' + 'Server: thrust\r\n' + 'Connection: keep-alive\r\n' + '\r\n' + content)
+                        let response = new JString('HTTP/1.1 500 Internal Server Error\r\n' + 'Date: ' + new Date().toString() + '\r\n' + 'Content-Type: text/plain\r\n' + 'Server: thrust\r\n' + 'Connection: close\r\n' + '\r\n' + content)
 
-                        channel.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)))
+                        channel.write(StandardCharsets.UTF_8.encode(response))
+                        channel.close()
                     }
-
+                    
                     // channel.write(ByteBuffer.wrap(('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
                     //   'Content-Type: text/plain\r\n' + 'Content-Length: 5\r\n' + 'Server: thrust\r\n' +
                     //   'Connection: keep-alive\r\n' + '\r\nOK!!!').getBytes()))
@@ -142,16 +150,33 @@ function mountRequest(httpChannel, textRequest) {
             if (key === 'Host') {
                 headers[key] = hdr[p++]
                 headers['Port'] = (hdr[p]) ? hdr[p] : '80'
-            } else {
+            } /*else if (key === 'Cookie') {
+                if (!headers['Cookie']) {
+                    headers['Cookie'] = {}
+                }
+
+                // const cookieKeyAndValue = hdr[p].split('=')
+                // for (let j = 0; j < cookieKeyAndValue.length; j+=2) {
+                //     headers['Cookie'][cookieKeyAndValue[j]] = cookieKeyAndValue[j+1]
+                // }
+                //TODO: AJUSTAR REGEX PARA COOKIES
+                const cookiesList = hdr[p].split(';')
+                for (let j = 0; j < cookiesList.length; j++) {
+                    const cookie = cookiesList[j].split('=')
+                    headers['Cookie'][cookie[0].trim()] = cookie[1]
+                }
+            }*/ else {
                 if (hdr.length > 2) {
-                    headers[key] = hdr.shift().join(':')
+                    //TODO: avaliar para tornar oficial
+                    // headers[key] = hdr.shift().join(':')
+                    headers[key] = hdr.join(':')
                 } else {
                     headers[key] = hdr[p]
                 }
             }
         }
 
-        console.log('\nheadersObj =>', headers)
+        // console.log('\nheadersObj =>', headers)
         return headers
     }
 
@@ -258,10 +283,7 @@ function mountResponse(channel) {
 
         headers: {},
 
-        out: [],
-
         clean: function() {
-            this.out = []
             this.headers = {}
             this.contentLength = 0
             this.contentType = 'text/html'
@@ -281,36 +303,73 @@ function mountResponse(channel) {
 
         plain: function(content) {
             let response = new JString('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
-                'Content-Type: text/plain\r\n' + 'Content-Length: ' + content.length + '\r\n' + 'Server: thrust\r\n' +
-                'Connection: keep-alive\r\n' + '\r\n' + content)
+                'Content-Type: text/plain\r\n' + 'Server: thrust\r\n' +
+                'Connection: close\r\n')
 
-            channel.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)))
+            Object
+                .keys(this.headers)
+                .forEach(header => {
+                    response += `${header}: ${this.headers[header]}\r\n`
+                })
+
+            response += '\r\n' + content 
+
+            channel.write(StandardCharsets.UTF_8.encode(response))
+            channel.close()
         },
 
-        json: function(data, headers) {
-            let body = (typeof (data) === 'object') ? JSON.stringify(data) : data
-            let response = new JString('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
-                'Content-Type: application/json\r\n' + 'Content-Length: ' + body.length + '\r\n' +
-                'Server: thrust\r\n' + 'Connection: keep-alive\r\n' + '\r\n' + body)
+        json: function(data, headers = this.headers) {
+            const body = (typeof (data) === 'object') ? JSON.stringify(data) : data
 
-            channel.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)))
+            let response = new JString('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
+                'Content-Type: application/json\r\n'  +
+                'Server: thrust\r\n' + 'Connection: close\r\n' )
+
+            Object
+                .keys(headers)
+                .forEach(header => {
+                    response += `${header}: ${headers[header]}\r\n`
+                })
+
+            response += '\r\n' + body
+
+            channel.write(StandardCharsets.UTF_8.encode(response))
+            channel.close()
         },
 
         html: function(content) {
             let response = new JString('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
-                'Content-Type: text/html\r\n' + 'Content-Length: ' + content.length + '\r\n' + 'Server: thrust\r\n' +
-                'Connection: keep-alive\r\n' + '\r\n' + content)
+                'Content-Type: text/html\r\n' + 'Server: thrust\r\n' +
+                'Connection: close\r\n')
 
-            channel.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)))
+            Object
+                .keys(this.headers)
+                .forEach(header => {
+                    response += `${header}: ${this.headers[header]}\r\n`
+                })
+
+            response += '\r\n' + content    
+
+            channel.write(StandardCharsets.UTF_8.encode(response))
+            channel.close()
         },
 
         binary: function(content) {
             let response = new JString('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
-                'Content-Type: application/octet-stream\r\n' + 'Content-Length: ' + content.length + '\r\n' +
-                'Server: thrust\r\n' + 'Connection: keep-alive\r\n' + '\r\n')
+                'Content-Type: application/octet-stream\r\n' +
+                'Server: thrust\r\n' + 'Connection: close\r\n')
 
-            channel.write(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)))
+            Object
+                .keys(this.headers)
+                .forEach(header => {
+                    response += `${header}: ${this.headers[header]}\r\n`
+                })
+
+            response += '\r\n'    
+
+            channel.write(StandardCharsets.UTF_8.encode(response))
             channel.write(ByteBuffer.wrap(content))
+            channel.close()
         },
 
         /**
@@ -319,8 +378,8 @@ function mountResponse(channel) {
          */
         error: {
             /**
-             * Escreve em formato *JSON* uma mensagem de erro como resposta a requisição no
-             * formato {message: *message*, status: *statusCode*}. Modifica o valor
+             * Escreve em formato *JSON* uma mensagem de erro como resposta a requisição. 
+             * Modifica o valor
              * do *content-type* para *'application/json'*.
              * @alias error.json
              * @memberof! http.Response#
@@ -329,23 +388,22 @@ function mountResponse(channel) {
              * @param {Number} statusCode - (opcional) status de retorno do request htttp.
              * @param {Object} headers - (opcional) configurações a serem definidas no header http.
              */
-            json: function(message, statusCode, headers) {
+            json: function(data, statusCode, headers) {
                 let code = statusCode || 200
-                let body = JSON.stringify({
-                    status: statusCode,
-                    message: message
-                })
+                let body = JSON.stringify(data)
                 let textResponse = 'HTTP/1.1 ' + RESPONSE_CODES[code] + '\r\n' +
                     'Date: ' + new Date().toString() + '\r\n' +
                     'Content-Type: application/json\r\n' +
-                    'Connection: keep-alive\r\n'
+                    'Connection: close\r\n'
 
                 for (let opt in (headers || {})) {
                     textResponse += opt + ': ' + headers[opt] + '\r\n'
                 }
 
                 textResponse += '\r\n' + body
-                channel.write(ByteBuffer.wrap(textResponse.getBytes(StandardCharsets.UTF_8)))
+
+                channel.write(StandardCharsets.UTF_8.encode(textResponse))
+                channel.close()
             }
         }
     }
@@ -388,8 +446,15 @@ function parseParams(strParams, contentType) {
     }
 
     function parseParam(sparam) {
-        let vpar = unescape(sparam).split('=')
-        parseKey(vpar[0], vpar[1])
+        // let vpar = unescape(sparam).split('=')
+        // parseKey(vpar[0], vpar[1])
+
+        var unescapedSParam = unescape(sparam)
+        var firstEqualIndex = unescapedSParam.indexOf('=')
+        var paramKey = unescapedSParam.substr(0, firstEqualIndex)
+        var paramValue = unescapedSParam.substr(firstEqualIndex + 1)
+
+        parseKey(paramKey, paramValue)
     }
 
     if (strParams !== null && strParams !== '') {
