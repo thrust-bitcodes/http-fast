@@ -1,8 +1,8 @@
 {
   "description": "Fast Http Server",
   "name": "http-fast",
-  "path": "index.js",
-  "version": "0.1.3",
-  "author": "Nery Jr",
+  "path": "dist",
+  "version": "0.1.4",
+  "authors": ["Nery Jr, Clerverson Puche"],
   "dependencies": []
 }

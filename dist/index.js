@@ -1,14 +1,12 @@
-let JString = Java.type('java.lang.String')
-let URLDecoder = Java.type('java.net.URLDecoder')
-let IOException = Java.type('java.io.IOException')
-let InetSocketAddress = Java.type('java.net.InetSocketAddress')
-let ByteBuffer = Java.type('java.nio.ByteBuffer')
-let SelectionKey = Java.type('java.nio.channels.SelectionKey')
-let Selector = Java.type('java.nio.channels.Selector')
-let ServerSocketChannel = Java.type('java.nio.channels.ServerSocketChannel')
-let SocketChannel = Java.type('java.nio.channels.SocketChannel')
-let Iterator = Java.type('java.util.Iterator')
-let StandardCharsets = Java.type('java.nio.charset.StandardCharsets')
+const JString = Java.type('java.lang.String')
+const InetSocketAddress = Java.type('java.net.InetSocketAddress')
+const ByteBuffer = Java.type('java.nio.ByteBuffer')
+const SelectionKey = Java.type('java.nio.channels.SelectionKey')
+const Selector = Java.type('java.nio.channels.Selector')
+const ServerSocketChannel = Java.type('java.nio.channels.ServerSocketChannel')
+const StandardCharsets = Java.type('java.nio.charset.StandardCharsets')
+
+let mountRequest = require('./request.js')
 
 /**
  * Gerenciador de rotas. Processa as requisições HTTP e segundo definições
@@ -37,15 +35,16 @@ function createServer(port, httpRouter, options) {
 
     let selector = Selector.open()
     let serverSocket = ServerSocketChannel.open()
-
-    let httpFastConfig = getConfig()['http-fast']
-    let httpFastIP = httpFastConfig ? httpFastConfig.address : '127.0.0.1'
-    let serverAddress = new InetSocketAddress(httpFastIP || '127.0.0.1', port)
+    let httpFastConfig = getConfig()['http-fast'] || {}
+    let httpFastIP = opts.address || httpFastConfig.address || '127.0.0.1'
+    let serverAddress = new InetSocketAddress(httpFastIP, port)
 
     serverSocket.bind(serverAddress)
     serverSocket.configureBlocking(false)
+
     let ops = serverSocket.validOps()
     let selectKy = serverSocket.register(selector, ops, null)
+    let buffer = ByteBuffer.allocate(opts.readBufferSize || httpFastConfig.readBufferSize || 32 * 1024)
     print('Running on port ' + port + '...')
 
     try {
@@ -54,6 +53,7 @@ function createServer(port, httpRouter, options) {
             let iterator = selector.selectedKeys().iterator()
 
             while (iterator.hasNext()) {
+                // java.nio.channels.SelectionKey
                 let myKey = iterator.next()
 
                 if (myKey.isAcceptable()) {
@@ -63,35 +63,27 @@ function createServer(port, httpRouter, options) {
                     client.register(selector, SelectionKey.OP_READ)
                     // print("Connection Accepted: " + client.getLocalAddress() + "\n");
                 } else if (myKey.isReadable()) {
+                    // java.nio.channels.SelectableChannel
+                    // java.nio.channels.SocketChannel
                     let channel = myKey.channel()
 
-                    let httpReadBufferSize = httpFastConfig.readBufferSize || (32 * 2014)
-                    let buffer = ByteBuffer.allocate(httpReadBufferSize)
-
-                    let len = channel.read(buffer)
-
-                    if (len <= 0) {
-                        continue
-                    }
-
-                    buffer.flip()
-                    let textRequest = new JString(buffer.array(), 0, len, StandardCharsets.UTF_8)
-                    // print("Message received: " + textRequest);
-
                     try {
-                        service(channel, textRequest)
+                        // service(channel, textRequest)
+                        // let di = new Date().getTime()
+                        service(channel, buffer)
+                        // let df = new Date().getTime()
+                        // console.log('\n==>', (df - di), 'ms')
                     } catch (e) {
-                        console.log('[ERROR] -', e.stack)
-                        let content = e.toString()
-                        let response = new JString('HTTP/1.1 500 Internal Server Error\r\n' + 'Date: ' + new Date().toString() + '\r\n' + 'Content-Type: text/plain\r\n' + 'Server: thrust\r\n' + 'Connection: close\r\n' + '\r\n' + content)
+                        if (!e.closeChannel) {
+                            console.log('[ERROR] -', e.stack || e.message || e)
+                            let content = e.toString()
+                            let response = new JString('HTTP/1.1 500 Internal Server Error\r\n' + 'Date: ' + new Date().toString() + '\r\n' + 'Content-Type: text/plain\r\n' + 'Content-Length: ' + content.length + '\r\n' + 'Server: thrust\r\n' + 'Connection: close\r\n' + '\r\n' + content)
 
-                        channel.write(StandardCharsets.UTF_8.encode(response))
+                            channel.write(StandardCharsets.UTF_8.encode(response))
+                        }
+                    } finally {
                         channel.close()
                     }
-                    
-                    // channel.write(ByteBuffer.wrap(('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
-                    //   'Content-Type: text/plain\r\n' + 'Content-Length: 5\r\n' + 'Server: thrust\r\n' +
-                    //   'Connection: keep-alive\r\n' + '\r\nOK!!!').getBytes()))
                 }
                 iterator.remove()
             }
@@ -101,13 +93,13 @@ function createServer(port, httpRouter, options) {
     }
 }
 
-// function service(httpRequest, httpResponse) {
-function service(httpChannel, textRequest) {
+function service(httpChannel, buffer) {
+    // let mountRequest = require('./.lib/bitcodes/thrust-bitcodes/http-fast/request.js')
     // let di = new Date().getTime()
-    let request = mountRequest(httpChannel, textRequest)
+    let request = mountRequest(httpChannel, buffer)
     // print('mountRequest processed in', (new Date().getTime() - di), 'ms')
     // di = new Date().getTime()
-    let response = mountResponse(httpChannel, textRequest)
+    let response = mountResponse(httpChannel)
     // print('mountResponse processed in', (new Date().getTime() - di), 'ms')
     // di = new Date().getTime()
     let params = parseParams(request.queryString, request.contentType)
@@ -130,146 +122,17 @@ function service(httpChannel, textRequest) {
     // print('router processed in', (new Date().getTime() - di), 'ms')
 }
 
-function mountRequest(httpChannel, textRequest) {
-    let headerAndBody = textRequest.split('\r\n\r\n')
-    let textHeaders = headerAndBody[0].split('\r\n')
-    let textBody = headerAndBody[1]
-    let headers
-    let getHeaders = function() {
-        if (headers) {
-            return headers
-        } else {
-            headers = {}
-        }
-
-        for (let i = 1; i < textHeaders.length; i++) {
-            let p = 0
-            let hdr = textHeaders[i].split(/:\s*/g)
-            let key = hdr[p++]
-
-            if (key === 'Host') {
-                headers[key] = hdr[p++]
-                headers['Port'] = (hdr[p]) ? hdr[p] : '80'
-            } /*else if (key === 'Cookie') {
-                if (!headers['Cookie']) {
-                    headers['Cookie'] = {}
-                }
-
-                // const cookieKeyAndValue = hdr[p].split('=')
-                // for (let j = 0; j < cookieKeyAndValue.length; j+=2) {
-                //     headers['Cookie'][cookieKeyAndValue[j]] = cookieKeyAndValue[j+1]
-                // }
-                //TODO: AJUSTAR REGEX PARA COOKIES
-                const cookiesList = hdr[p].split(';')
-                for (let j = 0; j < cookiesList.length; j++) {
-                    const cookie = cookiesList[j].split('=')
-                    headers['Cookie'][cookie[0].trim()] = cookie[1]
-                }
-            }*/ else {
-                if (hdr.length > 2) {
-                    //TODO: avaliar para tornar oficial
-                    // headers[key] = hdr.shift().join(':')
-                    headers[key] = hdr.join(':')
-                } else {
-                    headers[key] = hdr[p]
-                }
-            }
-        }
-
-        // console.log('\nheadersObj =>', headers)
-        return headers
-    }
-
-    // print('textRequest =>', textRequest)
-    // console.log('textHeaders =>', textHeaders)
-    // console.log('textBody =>', textBody)
-
-    let contentType = (textRequest.match(/Content-Type:\s+[\w|/]+/gi) || [''])[0].replace(/Content-Type:\s+/gi, '')
-    // let contentType = headers['Content-Type'] || ''
-    let methodAndUri = textHeaders[0].split(' ')
-    let httpMethod = methodAndUri[0]
-    let uri = methodAndUri[1]
-    let restAndQueryString = uri.split('?')
-
-    // console.log('methodAndUri =>', methodAndUri)
-    // console.log('httpMethod =>', httpMethod)
-    // console.log('restAndQueryString =>', restAndQueryString)
-
-    let queryString
-    let getQueryString = function() {
-        if (queryString) {
-            return queryString
-        }
-
-        let body
-        let qs
-
-        if (contentType.indexOf('multipart/form-data') === -1) {
-            body = textBody
-
-            if (body && body !== '') {
-                return contentType.startsWith('application/json') ? body : URLDecoder.decode(body, 'UTF-8')
-            }
-
-            qs = restAndQueryString[1]
-            qs = (!qs) ? '' : URLDecoder.decode(qs, 'UTF-8')
-        }
-
-        queryString = qs
-        // print('queryString =>', queryString)
-        return qs
-    }
-
-    /**
-     * @function {getParts} - Retorna uma coleção de '*javax.servlet.http.Parts*', que por definição
-     *  *"represents a part as uploaded to the server as part of a multipart/form-data
-     * request body. The part may represent either an uploaded file or form data."*
-     * @return {type} {description}
-     */
-    let parts = function() {
-        if (contentType.indexOf('multipart/form-data') === -1) { return [] }
-
-        return httpRequest.getParts().toArray()
-    }
-
-    return {
-        httpRequest: httpChannel,
-
-        get queryString() { return getQueryString() },
-
-        rest: restAndQueryString[0],
-
-        contentType: contentType,
-
-        method: httpMethod,
-
-        requestURI: uri,
-
-        pathInfo: '',
-
-        scheme: '',
-
-        // host: headers.Host,
-        get host() { return getHeaders().Host },
-
-        // port: headers.Port,
-        get port() { return getHeaders().Port },
-
-        // cookies: headers.Cookie,
-        get cookies() { return getHeaders().Cookie },
-
-        // headers: headers,
-        get headers() { return getHeaders() },
-
-        contextPath: '',
-
-        servletPath: '',
-
-        parts: parts
-    }
-}
 
 function mountResponse(channel) {
+    const headerReturned = (headers) => {
+        return Object
+            .keys(headers)
+            .reduce((acc, header) => {
+                acc += `${header}: ${headers[header]}\r\n`
+                return acc
+            }, '')
+
+    }
     let response = {
         httpResponse: channel,
 
@@ -302,74 +165,28 @@ function mountResponse(channel) {
         },
 
         plain: function(content) {
-            let response = new JString('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
-                'Content-Type: text/plain\r\n' + 'Server: thrust\r\n' +
-                'Connection: close\r\n')
-
-            Object
-                .keys(this.headers)
-                .forEach(header => {
-                    response += `${header}: ${this.headers[header]}\r\n`
-                })
-
-            response += '\r\n' + content 
+            let response = new JString(`HTTP/1.1 200 OK\r\nDate: ${new Date().toString()}\r\nContent-Type: text/plain\r\nContent-Length: ${content.length}\r\nServer: thrust\r\nConnection: close\r\n${headerReturned(this.headers)}\r\n${content}`)
 
             channel.write(StandardCharsets.UTF_8.encode(response))
-            channel.close()
         },
 
-        json: function(data, headers = this.headers) {
-            const body = (typeof (data) === 'object') ? JSON.stringify(data) : data
-
-            let response = new JString('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
-                'Content-Type: application/json\r\n'  +
-                'Server: thrust\r\n' + 'Connection: close\r\n' )
-
-            Object
-                .keys(headers)
-                .forEach(header => {
-                    response += `${header}: ${headers[header]}\r\n`
-                })
-
-            response += '\r\n' + body
+        json: function(data, headers) {
+            let body = (typeof (data) === 'object') ? JSON.stringify(data) : data
+            let response = new JString(`HTTP/1.1 200 OK\r\nDate: ${new Date().toString()}\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nServer: thrust\r\nConnection: close\r\n${headerReturned(this.headers)}\r\n${body}`)
 
             channel.write(StandardCharsets.UTF_8.encode(response))
-            channel.close()
         },
 
         html: function(content) {
-            let response = new JString('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
-                'Content-Type: text/html\r\n' + 'Server: thrust\r\n' +
-                'Connection: close\r\n')
-
-            Object
-                .keys(this.headers)
-                .forEach(header => {
-                    response += `${header}: ${this.headers[header]}\r\n`
-                })
-
-            response += '\r\n' + content    
+            let response = new JString(`HTTP/1.1 200 OK\r\nDate: ${new Date().toString()}\r\nContent-Type: text/html\r\nContent-Length: ${content.length}\r\nServer: thrust\r\nConnection: close\r\n${headerReturned(this.headers)}\r\n${content}`)
 
             channel.write(StandardCharsets.UTF_8.encode(response))
-            channel.close()
         },
 
         binary: function(content) {
-            let response = new JString('HTTP/1.1 200 OK\r\n' + 'Date: ' + new Date().toString() + '\r\n' +
-                'Content-Type: application/octet-stream\r\n' +
-                'Server: thrust\r\n' + 'Connection: close\r\n')
-
-            Object
-                .keys(this.headers)
-                .forEach(header => {
-                    response += `${header}: ${this.headers[header]}\r\n`
-                })
-
-            response += '\r\n'    
+            let response = new JString(`HTTP/1.1 200 OK\r\nDate: ${new Date().toString()}\r\n'Content-Type: application/octet-stream\r\nContent-Length: ${content.length}\r\nServer: thrust\r\nConnection: close\r\n${headerReturned(this.headers)}\r\n${content}`)
 
             channel.write(StandardCharsets.UTF_8.encode(response))
-            channel.write(ByteBuffer.wrap(content))
-            channel.close()
         },
 
         /**
@@ -378,8 +195,8 @@ function mountResponse(channel) {
          */
         error: {
             /**
-             * Escreve em formato *JSON* uma mensagem de erro como resposta a requisição. 
-             * Modifica o valor
+             * Escreve em formato *JSON* uma mensagem de erro como resposta a requisição no
+             * formato {message: *message*, status: *statusCode*}. Modifica o valor
              * do *content-type* para *'application/json'*.
              * @alias error.json
              * @memberof! http.Response#
@@ -388,22 +205,20 @@ function mountResponse(channel) {
              * @param {Number} statusCode - (opcional) status de retorno do request htttp.
              * @param {Object} headers - (opcional) configurações a serem definidas no header http.
              */
-            json: function(data, statusCode, headers) {
+            json: function(message, statusCode, headers) {
                 let code = statusCode || 200
-                let body = JSON.stringify(data)
-                let textResponse = 'HTTP/1.1 ' + RESPONSE_CODES[code] + '\r\n' +
-                    'Date: ' + new Date().toString() + '\r\n' +
-                    'Content-Type: application/json\r\n' +
-                    'Connection: close\r\n'
+                let body = JSON.stringify({
+                    status: statusCode,
+                    message: message
+                })
+                let textResponse = `HTTP/1.1 ${RESPONSE_CODES[code]}\r\nDate: ${new Date().toString()}\r\nContent-Type: application/json\r\nConnection: close\r\n${headerReturned(this.headers)}`
 
                 for (let opt in (headers || {})) {
                     textResponse += opt + ': ' + headers[opt] + '\r\n'
                 }
 
                 textResponse += '\r\n' + body
-
                 channel.write(StandardCharsets.UTF_8.encode(textResponse))
-                channel.close()
             }
         }
     }
@@ -457,9 +272,11 @@ function parseParams(strParams, contentType) {
         parseKey(paramKey, paramValue)
     }
 
-    if (strParams !== null && strParams !== '') {
+    if (strParams != undefined && strParams !== '') {
         if (contentType && contentType.startsWith('application/json')) {
             params = JSON.parse(strParams)
+        } else if (contentType.startsWith('multipart/form-data')) {
+            params = strParams
         } else {
             let arrParams = strParams.split('&')
 
