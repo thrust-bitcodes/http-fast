@@ -26,6 +26,11 @@ function createServer(port, httpRouter, options) {
     let config = getConfig().http || {}
     let staticFilesPath = opts.staticFilesPath || config.staticFilesPath || '/static'
 
+    let fnShutdownCallback = opts.shutdownCallback || config.shutdownCallback
+    if (typeof fnShutdownCallback !== 'function') {
+        fnShutdownCallback = () => false
+    }
+
     staticFilesPath = '/' + staticFilesPath.replace(/^\/|\/\*$|\//g, '') + '/*'
     router = (httpRouter) || {
         process: function() {
@@ -43,12 +48,13 @@ function createServer(port, httpRouter, options) {
     serverSocket.configureBlocking(false)
 
     let ops = serverSocket.validOps()
-    let selectKy = serverSocket.register(selector, ops, null)
+    serverSocket.register(selector, ops, null)
     let buffer = ByteBuffer.allocate(opts.readBufferSize || httpFastConfig.readBufferSize || 32 * 1024)
     print('Running on port ' + port + '...')
 
     try {
-        while (true) {
+        let running = true
+        while (running) {
             selector.select()
             let iterator = selector.selectedKeys().iterator()
 
@@ -70,7 +76,7 @@ function createServer(port, httpRouter, options) {
                     try {
                         // service(channel, textRequest)
                         // let di = new Date().getTime()
-                        service(channel, buffer)
+                        running = service(channel, buffer, fnShutdownCallback)
                         // let df = new Date().getTime()
                         // console.log('\n==>', (df - di), 'ms')
                     } catch (e) {
@@ -90,10 +96,16 @@ function createServer(port, httpRouter, options) {
         }
     } catch (ex) {
         console.log('[SERVER ERROR] -', ex)
+    } finally {
+        try {
+            serverSocket.close()
+        } catch (err) {
+            console.log('[SERVER CLOSE ERROR] -', err)
+        }
     }
 }
 
-function service(httpChannel, buffer) {
+function service(httpChannel, buffer, shutdownCallback) {
     // let mountRequest = require('./.lib/bitcodes/thrust-bitcodes/http-fast/request.js')
     // let di = new Date().getTime()
     let request = mountRequest(httpChannel, buffer)
@@ -116,10 +128,13 @@ function service(httpChannel, buffer) {
                         </html>`)
     } else if (request.rest === '/favicon.ico') {
         response.plain('')
+    } else if (shutdownCallback(params, request, response)) {
+        return false;
     } else {
         router.process(params, request, response)
     }
     // print('router processed in', (new Date().getTime() - di), 'ms')
+    return true
 }
 
 
